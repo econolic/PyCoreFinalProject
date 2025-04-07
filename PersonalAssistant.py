@@ -26,7 +26,8 @@ CONTACTS_FILE = "contacts.json"
 NOTES_FILE = "notes.json"
 
 # ------------------------------------------------------
-# UI: Функції форматування виводу (CLI)
+# ui.py (умовно)
+# Кольорові і форматуючі функції для консольного виводу
 # ------------------------------------------------------
 
 def print_border(title: str = "", width: int = 60) -> None:
@@ -120,7 +121,8 @@ def format_help_table(commands_data: List[List[str]], title: str = "Commands", w
     return "\n".join(output_lines)
 
 # ------------------------------------------------------
-# Models: BaseEntry, Contact, Note із використанням @dataclass
+# models.py (умовно)
+# Класи для даних: BaseEntry, Contact, Note
 # ------------------------------------------------------
 
 class BaseEntry(ABC):
@@ -299,7 +301,8 @@ class Note(BaseEntry):
             self.tags = fields["tags"]
 
 # ------------------------------------------------------
-# Collections: BaseBook, AddressBook, Notebook
+# collections.py (умовно)
+# Універсальний клас BaseBook, та його підкласи
 # ------------------------------------------------------
 
 E = TypeVar("E", bound=BaseEntry)
@@ -424,7 +427,8 @@ class Notebook(BaseBook[Note]):
         return [n for n in self.data.values() if n.created_at.date() == target]
 
 # ------------------------------------------------------
-# CLI: Команди користувача
+# cli.py (умовно)
+# Функції - команди для користувача
 # ------------------------------------------------------
 
 def input_error(func):
