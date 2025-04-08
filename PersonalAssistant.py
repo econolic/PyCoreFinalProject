@@ -1,7 +1,7 @@
 import json
 import logging
 import re
-from datetime import datetime, date, timedelta
+from datetime import datetime, date
 from typing import List, Optional, Dict, Type, TypeVar, Generic, Any
 from collections import UserDict, deque
 from abc import ABC, abstractmethod
@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 
 from colorama import Fore, Style, init
 from difflib import get_close_matches
+from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import WordCompleter
 
 # Ініціалізація colorama
 init(autoreset=True)
@@ -743,11 +745,18 @@ def main():
         ["close", "Альтернативна команда виходу"]
     ]
 
+    # Список команд для автодоповнення
+    all_commands = list(COMMANDS.keys()) + ["help", "exit", "close"]
+    command_completer = WordCompleter(all_commands, ignore_case=True)
+
+    # Використовуємо чистий рядок для PromptSession
+    session = PromptSession(">>> ", completer=command_completer)
+
     print(Fore.GREEN + "Вітаю! Це ваш персональний помічник." + Style.RESET_ALL)
     print("Наберіть 'help' для списку команд.")
 
     while True:
-        user_input = input(Fore.CYAN + ">>> " + Style.RESET_ALL).strip()
+        user_input = session.prompt().strip()
         if not user_input:
             continue
         parts = user_input.split(maxsplit=1)
@@ -756,6 +765,7 @@ def main():
 
         if command in ["exit", "close"]:
             print(Fore.YELLOW + "До побачення! Зберігаю дані..." + Style.RESET_ALL)
+            # Зберігаємо дані перед виходом
             abook.save(CONTACTS_FILE)
             nbook.save(NOTES_FILE)
             break
@@ -769,7 +779,7 @@ def main():
             func, target = COMMANDS[command]
             func(args, target)
         else:
-            suggestions = get_close_matches(command, list(COMMANDS.keys()) + ["exit", "help", "close"], n=1)
+            suggestions = get_close_matches(command, all_commands, n=1)
             if suggestions:
                 print(Fore.CYAN + f"Команду не знайдено. Можливо, ви мали на увазі: {suggestions[0]}?" + Style.RESET_ALL)
             else:
