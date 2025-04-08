@@ -155,15 +155,6 @@ class Contact(BaseEntry):
     birthday: Optional[date] = None
 
     def __post_init__(self):
-        if not self.name.strip():
-            raise ValueError("Ім'я не може бути порожнім.")
-        for phone in self.phones:
-            if not (phone.isdigit() and len(phone) == 10):
-                raise ValueError("Телефон має складатися з 10 цифр.")
-        pattern = r"[^@]+@[^@]+\.[^@]+"
-        for email in self.emails:
-            if not re.match(pattern, email):
-                raise ValueError("Неправильний формат Email.")
         if self.birthday and isinstance(self.birthday, str):
             fmt_candidates = ["%d.%m.%Y", "%Y-%m-%d"]
             parsed = None
@@ -472,6 +463,31 @@ def parse_contact_input(tokens: List[str]) -> Dict[str, Any]:
         result["emails"] = emails
     return result
 
+# Перевірка правильності номера телефону формату +380XXXXXXXXX
+def validate_phone(phone: str) -> str:
+    if re.fullmatch(r"\+380\d{9}", phone):
+        return phone
+    elif re.fullmatch(r"0\d{9}", phone):
+        return "+38" + phone
+    return ""
+
+# Перевірка правильності email
+def validate_email(email: str) -> bool:
+    return bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email))
+
+# Перевірка правильності формату дати
+def validate_birthday(bday: str) -> bool:
+    for fmt in ["%d.%m.%Y", "%Y-%m-%d"]:
+        try:
+            datetime.strptime(bday, fmt)
+            return True
+        except ValueError:
+            continue
+    return False
+
+def normalize_name(name: str) -> str:
+    return " ".join(part.capitalize() for part in name.strip().split())
+
 @input_error
 def add_contact(args: List[str], abook: AddressBook):
     """
@@ -480,18 +496,64 @@ def add_contact(args: List[str], abook: AddressBook):
     """
     if args:
         data = parse_contact_input(args)
+        if "name" in data:
+            data["name"] = normalize_name(data["name"])  # нормалізація ім'я
+        if "phones" in data:
+            valid_phones = []
+            for p in data["phones"]:
+                norm_phone = validate_phone(p)
+                if norm_phone:
+                    valid_phones.append(norm_phone)
+                else:
+                    raise ValueError("Телефон має бути у форматі +380XXXXXXXXX або 0XXXXXXXXX")
+            data["phones"] = valid_phones
+
     else:
-        name = input("Enter full name: ").strip()
-        phone = input("Enter phone (optional): ").strip()
-        emails_str = input("Enter emails (optional, separated by space): ").strip()
-        birthday = input("Enter birthday (optional, DD.MM.YYYY or YYYY-MM-DD): ").strip()
+        while True:
+            name = input("Enter full name: ").strip()
+            if name:
+                name = normalize_name(name)
+                break
+            print(Fore.RED + "Ім'я не може бути порожнім." + Style.RESET_ALL)
+        
+        phones = []
+        while True:    
+            phone = input("Enter phone (optional, format +380XXXXXXXXX or 0XXXXXXXXX): ").strip()
+            if not phone:
+                break
+            norm = validate_phone(phone)
+            if norm:
+                phones = [norm if isinstance(norm, str) else str(norm)]
+                break
+            print(Fore.RED + "Телефон має бути у форматі +380XXXXXXXXX або 0XXXXXXXXX." + Style.RESET_ALL)
+        
+        emails = []
+        while True:
+            emails_str = input("Enter emails (optional, separated by space): ").strip()
+            if not emails_str:
+                break
+            emails = emails_str.split()
+            if all(validate_email(e) for e in emails):
+                break
+            print(Fore.RED + "Один або кілька email некоректні. Спробуйте ще раз." + Style.RESET_ALL)
+        
+        birthday = None
+        while True:
+            birthday_input = input("Enter birthday (optional, DD.MM.YYYY or YYYY-MM-DD): ").strip()
+            if not birthday_input:
+                break
+            if validate_birthday(birthday_input):
+                birthday = birthday_input
+                break
+            print(Fore.RED + "Неправильний формат дати. Спробуйте ще раз." + Style.RESET_ALL)
         data = {"name": name}
         if phone:
-            data["phones"] = [phone]
+            data["phones"] = phones
         if emails_str:
             data["emails"] = emails_str.split()
         if birthday:
             data["birthday"] = birthday
+
     new_id = abook.create_and_add(**data)
     contact_obj = abook.find_by_id(new_id)
     block = format_contact(contact_obj)
