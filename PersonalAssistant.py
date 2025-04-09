@@ -784,6 +784,53 @@ def main():
                 print(Fore.CYAN + f"Команду не знайдено. Можливо, ви мали на увазі: {suggestions[0]}?" + Style.RESET_ALL)
             else:
                 print(Fore.RED + "Невідома команда. Спробуйте 'help' для списку команд." + Style.RESET_ALL)
+@input_error
+def delete_note_by_text(args: List[str], nb: Notebook):
+    """
+    delete-note-text <query>
+    Видаляє всі нотатки, що містять текст або його частину.
+    """
+    if not args:
+        raise ValueError("Використання: delete-note-text <query>")
+    query = " ".join(args)
+    matches = nb.find(query)
+    if not matches:
+        print(Fore.CYAN + "Нотатку не знайдено." + Style.RESET_ALL)
+        return
+    for note in matches:
+        nb.delete(note.id)
+        print(Fore.GREEN + f"Нотатку ID={note.id} видалено." + Style.RESET_ALL)
+
+
+@input_error
+def pin_note(args: List[str], nb: Notebook):
+    """
+    pin-note <id>
+    Додає тег 📌 до нотатки для закріплення.
+    """
+    if not args:
+        raise ValueError("Використання: pin-note <id>")
+    id_val = int(args[0])
+    note = nb.find_by_id(id_val)
+    if "📌" not in note.tags:
+        note.tags.append("📌")
+    print(Fore.GREEN + f"Нотатку ID={id_val} закріплено." + Style.RESET_ALL)
+
+
+@input_error
+def list_pinned_notes(args: List[str], nb: Notebook):
+    """
+    list-pinned
+    Виводить усі нотатки з тегом 📌.
+    """
+    results = nb.find_by_tag("📌")
+    if not results:
+        print(Fore.CYAN + "Закріплених нотаток немає." + Style.RESET_ALL)
+        return
+    print(Fore.GREEN + f"Знайдено {len(results)} закріплених нотаток:" + Style.RESET_ALL)
+    for note in results:
+        block = format_note(note)
+        print_colored_box(f"Note ID={note.id}", block.split("\n"))
 
 if __name__ == "__main__":
     main()
