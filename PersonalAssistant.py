@@ -997,8 +997,8 @@ def main():
         "sort-by-date": (lambda args: sort_notes_by_date(args, nbook, abook)),
         "search-tag": (lambda args: search_note_by_tag(args, nbook, abook)),
         "search-date": (lambda args: search_note_by_date(args, nbook, abook)),
-        "undo-note": (lambda args: undo_note(args, nbook))
-       # "list-tags": (list_tags, nbook)
+        "undo-note": (lambda args: undo_note(args, nbook)),
+        "list-tags": (lambda args: list_tags(args, nbook)),
     }
 
     help_data_contacts = [
