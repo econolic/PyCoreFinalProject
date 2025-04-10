@@ -1,0 +1,36 @@
+{
+    "1": {
+        "id": 1,
+        "name": "Max 098647584 23021982",
+        "phones": [],
+        "emails": [],
+        "birthday": null
+    },
+    "2": {
+        "id": 2,
+        "name": "Max",
+        "phones": [
+            "+380986735264"
+        ],
+        "emails": [
+            "1@1.go.it"
+        ],
+        "birthday": "1987-12-23"
+    },
+    "3": {
+        "id": 3,
+        "name": "Ser",
+        "phones": [
+            "+380679873475"
+        ],
+        "emails": [],
+        "birthday": null
+    },
+    "4": {
+        "id": 4,
+        "name": "Irina",
+        "phones": [],
+        "emails": [],
+        "birthday": null
+    }
+}
