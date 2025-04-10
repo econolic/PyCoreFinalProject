@@ -714,7 +714,8 @@ def main():
         "sort-by-date": (sort_notes_by_date, nbook),
         "search-tag": (search_note_by_tag, nbook),
         "search-date": (search_note_by_date, nbook),
-        "undo-note": (undo_note, nbook)
+        "undo-note": (undo_note, nbook),
+        "list-tags": (list_tags, nbook)
     }
 
     help_data_contacts = [
@@ -736,7 +737,8 @@ def main():
         ["sort-by-date", "Сортувати нотатки за датою створення"],
         ["search-tag", "Пошук нотаток за тегом"],
         ["search-date", "Пошук нотаток за датою (YYYY-MM-DD)"],
-        ["undo-note", "Скасувати останню дію з нотатками"]
+        ["undo-note", "Скасувати останню дію з нотатками"],
+        ["list-tags", "Показати всі унікальні теги з фільтрацією або сортуванням"]
     ]
 
     help_data_general = [
@@ -831,6 +833,43 @@ def list_pinned_notes(args: List[str], nb: Notebook):
     for note in results:
         block = format_note(note)
         print_colored_box(f"Note ID={note.id}", block.split("\n"))
+@input_error
+def list_tags(args: List[str], nb: Notebook):
+    """
+    list-tags [<filter>]
+    Виводить усі унікальні теги, доступні в нотатках.
+    Можна відсортувати за датою або знайти за частковим збігом слова.
+    """
+    from collections import defaultdict
 
+    tag_dict = defaultdict(list)  # тег -> список дат
+
+    for note in nb.notes.values():
+        for tag in note.tags:
+            tag_dict[tag].append(note.created)
+
+    if not tag_dict:
+        print(Fore.CYAN + "Жодного тегу не знайдено." + Style.RESET_ALL)
+        return
+
+    filter_value = args[0] if args else None
+    result = list(tag_dict.keys())
+
+    # Фільтр за частиною слова
+    if filter_value and filter_value.lower() not in ("date", "desc", "asc"):
+        result = [tag for tag in result if filter_value.lower() in tag.lower()]
+
+    # Сортування за датою
+    elif filter_value == "date":
+        result.sort(key=lambda tag: min(tag_dict[tag]))
+
+    elif filter_value == "desc":
+        result.sort(key=lambda tag: min(tag_dict[tag]), reverse=True)
+
+    # Вивід
+    print(Fore.GREEN + "Унікальні теги:" + Style.RESET_ALL)
+    for tag in result:
+        count = len(tag_dict[tag])
+        print(f"• {tag} ({count} нот.)")
 if __name__ == "__main__":
     main()
