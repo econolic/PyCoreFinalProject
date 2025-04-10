@@ -998,7 +998,7 @@ def main():
         "search-tag": (lambda args: search_note_by_tag(args, nbook, abook)),
         "search-date": (lambda args: search_note_by_date(args, nbook, abook)),
         "undo-note": (lambda args: undo_note(args, nbook))
-        "list-tags": (list_tags, nbook)
+       # "list-tags": (list_tags, nbook)
     }
 
     help_data_contacts = [
@@ -1069,6 +1069,7 @@ def main():
                 print(Fore.CYAN + f"Команду не знайдено. Можливо, ви мали на увазі: {suggestions[0]}?" + Style.RESET_ALL)
             else:
                 print(Fore.RED + "Невідома команда. Спробуйте 'help' для списку команд." + Style.RESET_ALL)
+
 @input_error
 def delete_note_by_text(args: List[str], nb: Notebook):
     """
@@ -1101,7 +1102,6 @@ def pin_note(args: List[str], nb: Notebook):
         note.tags.append("📌")
     print(Fore.GREEN + f"Нотатку ID={id_val} закріплено." + Style.RESET_ALL)
 
-
 @input_error
 def list_pinned_notes(args: List[str], nb: Notebook):
     """
@@ -1116,6 +1116,7 @@ def list_pinned_notes(args: List[str], nb: Notebook):
     for note in results:
         block = format_note(note)
         print_colored_box(f"Note ID={note.id}", block.split("\n"))
+
 @input_error
 def list_tags(args: List[str], nb: Notebook):
     """
@@ -1154,5 +1155,7 @@ def list_tags(args: List[str], nb: Notebook):
     for tag in result:
         count = len(tag_dict[tag])
         print(f"• {tag} ({count} нот.)")
+
+
 if __name__ == "__main__":
     main()
