@@ -987,6 +987,7 @@ def main():
         "delete-contact": (lambda args: delete_contact(args, abook, nbook)),
         "birthdays": (lambda args: upcoming_birthdays(args, abook)),
         "undo-contact": (lambda args: undo_contact(args, abook)),
+      
         # Нотатки
         "add-note": (lambda args: add_note(args, nbook)),
         "list-notes": (lambda args: list_notes(args, nbook, abook)),
@@ -997,6 +998,7 @@ def main():
         "search-tag": (lambda args: search_note_by_tag(args, nbook, abook)),
         "search-date": (lambda args: search_note_by_date(args, nbook, abook)),
         "undo-note": (lambda args: undo_note(args, nbook))
+        "list-tags": (list_tags, nbook)
     }
 
     help_data_contacts = [
@@ -1018,7 +1020,8 @@ def main():
         ["sort-by-date", "Сортувати нотатки за датою створення"],
         ["search-tag", "Пошук нотаток за тегом"],
         ["search-date", "Пошук нотаток за датою (YYYY-MM-DD)"],
-        ["undo-note", "Скасувати останню дію з нотатками"]
+        ["undo-note", "Скасувати останню дію з нотатками"],
+        ["list-tags", "Показати всі унікальні теги з фільтрацією або сортуванням"]
     ]
 
     help_data_general = [
@@ -1066,6 +1069,90 @@ def main():
                 print(Fore.CYAN + f"Команду не знайдено. Можливо, ви мали на увазі: {suggestions[0]}?" + Style.RESET_ALL)
             else:
                 print(Fore.RED + "Невідома команда. Спробуйте 'help' для списку команд." + Style.RESET_ALL)
+@input_error
+def delete_note_by_text(args: List[str], nb: Notebook):
+    """
+    delete-note-text <query>
+    Видаляє всі нотатки, що містять текст або його частину.
+    """
+    if not args:
+        raise ValueError("Використання: delete-note-text <query>")
+    query = " ".join(args)
+    matches = nb.find(query)
+    if not matches:
+        print(Fore.CYAN + "Нотатку не знайдено." + Style.RESET_ALL)
+        return
+    for note in matches:
+        nb.delete(note.id)
+        print(Fore.GREEN + f"Нотатку ID={note.id} видалено." + Style.RESET_ALL)
 
+
+@input_error
+def pin_note(args: List[str], nb: Notebook):
+    """
+    pin-note <id>
+    Додає тег 📌 до нотатки для закріплення.
+    """
+    if not args:
+        raise ValueError("Використання: pin-note <id>")
+    id_val = int(args[0])
+    note = nb.find_by_id(id_val)
+    if "📌" not in note.tags:
+        note.tags.append("📌")
+    print(Fore.GREEN + f"Нотатку ID={id_val} закріплено." + Style.RESET_ALL)
+
+
+@input_error
+def list_pinned_notes(args: List[str], nb: Notebook):
+    """
+    list-pinned
+    Виводить усі нотатки з тегом 📌.
+    """
+    results = nb.find_by_tag("📌")
+    if not results:
+        print(Fore.CYAN + "Закріплених нотаток немає." + Style.RESET_ALL)
+        return
+    print(Fore.GREEN + f"Знайдено {len(results)} закріплених нотаток:" + Style.RESET_ALL)
+    for note in results:
+        block = format_note(note)
+        print_colored_box(f"Note ID={note.id}", block.split("\n"))
+@input_error
+def list_tags(args: List[str], nb: Notebook):
+    """
+    list-tags [<filter>]
+    Виводить усі унікальні теги, доступні в нотатках.
+    Можна відсортувати за датою або знайти за частковим збігом слова.
+    """
+    from collections import defaultdict
+
+    tag_dict = defaultdict(list)  # тег -> список дат
+
+    for note in nb.data.values():
+        for tag in note.tags:
+            tag_dict[tag].append(note.created_at)
+
+    if not tag_dict:
+        print(Fore.CYAN + "Жодного тегу не знайдено." + Style.RESET_ALL)
+        return
+
+    filter_value = args[0] if args else None
+    result = list(tag_dict.keys())
+
+    # Фільтр за частиною слова
+    if filter_value and filter_value.lower() not in ("date", "desc", "asc"):
+        result = [tag for tag in result if filter_value.lower() in tag.lower()]
+
+    # Сортування за датою
+    elif filter_value == "date":
+        result.sort(key=lambda tag: min(tag_dict[tag]))
+
+    elif filter_value == "desc":
+        result.sort(key=lambda tag: min(tag_dict[tag]), reverse=True)
+
+    # Вивід
+    print(Fore.GREEN + "Унікальні теги:" + Style.RESET_ALL)
+    for tag in result:
+        count = len(tag_dict[tag])
+        print(f"• {tag} ({count} нот.)")
 if __name__ == "__main__":
     main()
