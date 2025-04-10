@@ -844,9 +844,9 @@ def list_tags(args: List[str], nb: Notebook):
 
     tag_dict = defaultdict(list)  # тег -> список дат
 
-    for note in nb.notes.values():
+    for note in nb.data.values():
         for tag in note.tags:
-            tag_dict[tag].append(note.created)
+            tag_dict[tag].append(note.created_at)
 
     if not tag_dict:
         print(Fore.CYAN + "Жодного тегу не знайдено." + Style.RESET_ALL)
