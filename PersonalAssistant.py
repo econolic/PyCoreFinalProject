@@ -1,4 +1,4 @@
-add-import json
+import json
 import logging
 import re
 from datetime import datetime, date
@@ -198,7 +198,10 @@ class Contact(BaseEntry):
 
     def matches(self, query: str) -> bool:
         q = query.lower()
-        if q in self.name.lower():
+        if any(q in part for part in self.name.lower().split()):
+            return True
+        from difflib import get_close_matches
+        if get_close_matches(q, [self.name.lower()], n=1, cutoff=0.7):
             return True
         for p in self.phones:
             if q in p:
@@ -482,21 +485,53 @@ def parse_contact_input(tokens: List[str]) -> Dict[str, Any]:
     phone = None
     emails = []
     name_parts = []
+    birthday = None
+
     for token in tokens:
-        if token.isdigit() and len(token) == 10 and phone is None:
-            phone = token
-        elif "@" in token:
+        if not phone and validate_phone(token):
+            phone = validate_phone(token)
+        elif validate_email(token):
             emails.append(token)
+        elif validate_birthday(token):
+            birthday = token
         else:
             name_parts.append(token)
+
     name = " ".join(name_parts).strip()
-    result = {"name": name}
+    result = {"name": normalize_name(name)}
     if phone:
         result["phones"] = [phone]
     if emails:
         result["emails"] = emails
+    if birthday:
+        result["birthday"] = birthday
     return result
 
+# Перевірка правильності номера телефону формату +380XXXXXXXXX
+def validate_phone(phone: str) -> str:
+     if re.fullmatch(r"\+380\d{9}", phone):
+         return phone
+     elif re.fullmatch(r"0\d{9}", phone):
+         return "+38" + phone
+     return ""
+ 
+# Перевірка правильності email
+def validate_email(email: str) -> bool:
+     return bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email))
+ 
+# Перевірка правильності формату дати
+def validate_birthday(bday: str) -> bool:
+     for fmt in ["%d.%m.%Y", "%Y-%m-%d"]:
+         try:
+             datetime.strptime(bday, fmt)
+             return True
+         except ValueError:
+             continue
+     return False
+ 
+def normalize_name(name: str) -> str:
+     return " ".join(part.capitalize() for part in name.strip().split())
+ 
 @input_error
 def add_contact(args: List[str], abook: AddressBook, nbook: Notebook):
     """
@@ -517,7 +552,8 @@ def add_contact(args: List[str], abook: AddressBook, nbook: Notebook):
                 else:
                     raise ValueError("Телефон має бути у форматі +380XXXXXXXXX або 0XXXXXXXXX")
             data["phones"] = valid_phones
-
+        if not data.get("phones") and not data.get("emails") and not data.get("birthday"):
+            raise ValueError("Неможливо створити контакт без жодної валідної інформації: телефону, email або дати народження.")
     else:
         while True:
             name = input("Enter full name: ").strip()
@@ -628,16 +664,28 @@ def edit_contact(args: List[str], abook: AddressBook):
     if len(args) < 2:
         raise ValueError("Використання: edit-contact <id> поле=значення ...")
     id_val = int(args[0])
-    changes = {}
-    for chunk in args[1:]:
-        if "=" in chunk:
-            key, val = chunk.split("=", 1)
-            key = key.strip()
-            val = val.strip().strip('"').strip("'")
-            if key in ("phones", "emails"):
-                changes[key] = [x.strip() for x in val.split(",")]
-            else:
-                changes[key] = val
+    changes = {"phones": [], "emails": []}
+    name_parts = []
+    
+    for token in args[1:]:
+        if validate_phone(token):
+            changes["phones"].append(validate_phone(token))
+        elif validate_email(token):
+            changes["emails"].append(token)
+        elif validate_birthday(token):
+            changes["birthday"] = token
+        else:
+            name_parts.append(token)
+
+    if name_parts:
+        changes["name"] = normalize_name(" ".join(name_parts))
+
+    if not changes["phones"]:
+        del changes["phones"]
+    if not changes["emails"]:
+        del changes["emails"]   
+
+
     abook.edit(id_val, **changes)
     print(Fore.GREEN + f"Контакт ID={id_val} відредаговано." + Style.RESET_ALL)
 
@@ -645,18 +693,39 @@ def edit_contact(args: List[str], abook: AddressBook):
 def delete_contact(args: List[str], abook: AddressBook, nbook: "Notebook"):
     if not args:
         raise ValueError("Використання: delete-contact <id>")
-    id_val = int(args[0])
-    try:
-        contact = abook.find_by_id(id_val)
-    except KeyError:
-        print(Fore.RED + f"Контакт ID={id_val} не знайдено." + Style.RESET_ALL)
-        return
+    
+    identifier = " ".join(args).strip()
+    if identifier.isdigit():
+        id_val = int(identifier)
+        try:
+            contact = abook.find_by_id(id_val)
+        except KeyError:
+            print(Fore.RED + f"Контакт ID={id_val} не знайдено." + Style.RESET_ALL)
+            return
+    else:
+        matches = abook.find(identifier)
+        if not matches:
+            print(Fore.RED + f"Контакт з іменем '{identifier}' не знайдено." + Style.RESET_ALL)
+            return
+        elif len(matches) > 1:
+            print(Fore.YELLOW + f"Знайдено кілька контактів за ім'ям '{identifier}':" + Style.RESET_ALL)
+            for c in matches:
+                print(f"  ID={c.id}: {c.name}")
+            print(Fore.CYAN + "Уточніть ID для видалення." + Style.RESET_ALL)
+            print("Використайте команду: delete-contact <ID>")
+            return
+        else:
+            contact = matches[0]
+            id_val = contact.id
 
     linked_notes = nbook.find_by_contact_id(id_val)
     if linked_notes:
         note_ids = [note.id for note in linked_notes]
         print(Fore.YELLOW + f"Увага: Контакт '{contact.name}' пов'язаний з нотатками {note_ids}." + Style.RESET_ALL)
         choice = input("Видалити пов'язані нотатки (D) чи залишити їх без цього контакту (K)? [D/K]: ").strip().lower()
+        if choice not in ('d', 'k', ''):
+            print(Fore.RED + "Невідома відповідь. Операція скасована." + Style.RESET_ALL)
+            return
         if choice == 'd':
             # Видаляємо всі пов'язані нотатки
             for note in linked_notes:
@@ -935,8 +1004,8 @@ def main():
         ["list-contacts", "Список всіх контактів"],
         ["search-contact", "Пошук контакту за всіма полями"],
         ["edit-contact", "Редагувати контакт: edit-contact <id> поле=значення"],
-        ["delete-contact", "Видалити контакт за ID (з обробкою пов'язаних нотаток)"],
-        ["birthdays", "Показати контакти з ДН протягом 7 днів (days=N опціонально)"],
+        ["delete-contact", "Видалити контакт за ID або ім’ям (з обробкою пов'язаних нотаток)"],
+        ["birthdays", "Контакти з ДН через N днів (за замовчуванням 7), приклад: birthdays days=10"],
         ["undo-contact", "Скасувати останню дію з контактами"]
     ]
 
