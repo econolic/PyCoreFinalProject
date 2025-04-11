@@ -1,3 +1,5 @@
+<img src="https://github.com/user-attachments/assets/78a413ef-dc33-4582-af11-59a274d49f65" alt="Логотип команди" width="200">
+
 # PyCoreFinalProject
 **PyCore Final Team Project**  
 **Персональний Помічник**
