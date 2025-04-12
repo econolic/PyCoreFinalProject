@@ -1,16 +1,19 @@
 import json
-import logging
+import pickle
+import os
 import re
+import logging
+import textwrap
 from datetime import datetime, date
-from typing import List, Optional, Dict, Type, TypeVar, Generic, Any, Tuple
-from collections import UserDict, deque
+from typing import List, Optional, Dict, Type, TypeVar, Generic, Any
+from collections import UserDict, deque, defaultdict
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 
 from colorama import Fore, Style, init
 from difflib import get_close_matches
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.completion import Completer, Completion
 
 # Ініціалізація colorama
 init(autoreset=True)
@@ -22,21 +25,19 @@ MAX_UNDO_STEPS = 10
 CONTACTS_FILE = "contacts.json"
 NOTES_FILE = "notes.json"
 
+# Тимчасові файли (pickle) для сесії
+SESSION_CONTACTS_FILE = "contacts_session.pkl"
+SESSION_NOTES_FILE = "notes_session.pkl"
+
 logging.basicConfig(
     filename="personal_assistant.log",
     level=logging.ERROR,
     format="%(asctime)s %(levelname)s: %(message)s"
 )
 
-# Константи
-MAX_UNDO_STEPS = 10
-CONTACTS_FILE = "contacts.json"
-NOTES_FILE = "notes.json"
-
 # ------------------------------------------------------
 # Утиліти для форматованого виводу
 # ------------------------------------------------------
-
 def print_border(title: str = "", width: int = 60) -> None:
     """Друкує верхню рамку з опціональним заголовком."""
     if title:
@@ -115,25 +116,49 @@ def format_help_table(commands_data: List[List[str]], title: str = "Commands", w
     """Форматує допоміжну таблицю з командами."""
     max_cmd_len = max(len(row[0]) for row in commands_data)
     output_lines = []
-    separator = "+" + "-"*(width-2) + "+"
-    header_line = f"| {title.center(width-2)} |"
+    separator = "+" + "-" * (width - 2) + "+"
+    header_line = f"| {title.center(width - 2)} |"
     output_lines.append(separator)
     output_lines.append(header_line)
     output_lines.append(separator)
     for cmd, desc in commands_data:
-        line = f"| {Fore.CYAN}{cmd:<{max_cmd_len}}{Style.RESET_ALL} : {desc}"
-        space_left = width - 2 - len(line)
+        # Спочатку обгортання для опису, щоб не вилазив за межі width
+        # На кожен рядок залишимо (width - 4 - max_cmd_len - 3) символів
+        # 4 символи це "|" + " " з обох боків + "|"
+        # max_cmd_len — місце під команду
+        # 3 символи мінімальний пробіл між командою та описом
+        wrap_width = width - (max_cmd_len + 4 + 3)
+        wrapped_desc = textwrap.wrap(desc, width=wrap_width) if wrap_width > 10 else [desc]
+        if not wrapped_desc:
+            wrapped_desc = [""]
+        # Формуємо перший рядок з командою
+        first_desc_line = wrapped_desc[0]
+        line = f"| {Fore.CYAN}{cmd:<{max_cmd_len}}{Style.RESET_ALL} : {first_desc_line}"
+        space_left = width - 2 - len(remove_ansi_escape(line))
         if space_left < 0:
             space_left = 0
         line += " " * space_left + "|"
         output_lines.append(line)
+
+        # Якщо опис займає кілька рядків, виводимо решту з відступами
+        for add_line in wrapped_desc[1:]:
+            line = f"| {' ' * (max_cmd_len + 3)} {add_line}"
+            space_left = width - 2 - len(remove_ansi_escape(line))
+            if space_left < 0:
+                space_left = 0
+            line += " " * space_left + "|"
+            output_lines.append(line)
+
     output_lines.append(separator)
     return "\n".join(output_lines)
+
+def remove_ansi_escape(s: str) -> str:
+    """Допоміжна функція, щоб прибрати ANSI-коди кольорів під час обчислення довжини."""
+    return re.sub(r'\x1b\[[0-9;]*m', '', s)
 
 # ------------------------------------------------------
 # Базові класи даних
 # ------------------------------------------------------
-
 class BaseEntry(ABC):
     """Абстрактний базовий клас для записів."""
     id: int
@@ -165,16 +190,7 @@ class Contact(BaseEntry):
 
     def __post_init__(self):
         if self.birthday and isinstance(self.birthday, str):
-            fmt_candidates = ["%d.%m.%Y", "%Y-%m-%d"]
-            parsed = None
-            for fmt in fmt_candidates:
-                try:
-                    parsed = datetime.strptime(self.birthday, fmt).date()
-                    break
-                except ValueError:
-                    continue
-            if not parsed:
-                raise ValueError("Дата народження в неправильному форматі.")
+            parsed = parse_birthday(self.birthday)
             self.birthday = parsed
 
     def to_dict(self) -> dict:
@@ -198,9 +214,8 @@ class Contact(BaseEntry):
 
     def matches(self, query: str) -> bool:
         q = query.lower()
-        if any(q in part for part in self.name.lower().split()):
+        if q in self.name.lower():
             return True
-        from difflib import get_close_matches
         if get_close_matches(q, [self.name.lower()], n=1, cutoff=0.7):
             return True
         for p in self.phones:
@@ -221,19 +236,8 @@ class Contact(BaseEntry):
         if "emails" in fields:
             self.emails = fields["emails"]
         if "birthday" in fields:
-            self.birthday = fields["birthday"]
-            if isinstance(self.birthday, str):
-                fmt_candidates = ["%d.%m.%Y", "%Y-%m-%d"]
-                parsed = None
-                for fmt in fmt_candidates:
-                    try:
-                        parsed = datetime.strptime(self.birthday, fmt).date()
-                        break
-                    except ValueError:
-                        continue
-                if not parsed:
-                    raise ValueError("Дата народження в неправильному форматі.")
-                self.birthday = parsed
+            bday_str = fields["birthday"]
+            self.birthday = parse_birthday(bday_str)
 
     def birthday_str(self) -> str:
         return self.birthday.strftime("%d.%m.%Y") if self.birthday else ""
@@ -311,7 +315,6 @@ class Note(BaseEntry):
 # ------------------------------------------------------
 # Універсальні колекції
 # ------------------------------------------------------
-
 E = TypeVar("E", bound=BaseEntry)
 
 class BaseBook(UserDict, Generic[E]):
@@ -381,6 +384,8 @@ class BaseBook(UserDict, Generic[E]):
     @classmethod
     def load(cls, filename: str) -> "BaseBook":
         new_book = cls()
+        if not os.path.exists(filename):
+            return new_book
         try:
             with open(filename, "r", encoding="utf-8") as f:
                 raw = json.load(f)
@@ -394,11 +399,11 @@ class BaseBook(UserDict, Generic[E]):
             new_book._max_id = max(new_book._max_id, eid)
         return new_book
 
-class AddressBook(BaseBook[Contact]):
+class AddressBook(BaseBook["Contact"]):
     entry_class = Contact
     entry_type_name = "контакт"
 
-    def get_upcoming_birthdays(self, days_ahead: int = 7) -> List[Contact]:
+    def get_upcoming_birthdays(self, days_ahead: int = 7) -> List["Contact"]:
         today = date.today()
         results = []
         for c in self.data.values():
@@ -411,47 +416,182 @@ class AddressBook(BaseBook[Contact]):
                 results.append(c)
         return results
 
-    def create_note_for_contact(
-        self,
-        nbook: "Notebook",
-        contact_id: int,
-        text: str,
-        tags: Optional[List[str]] = None
-    ) -> int:
+    def create_note_for_contact(self, nbook: "Notebook", contact_id: int,
+        text: str, tags: Optional[List[str]] = None) -> int:
         """
         Створює нотатку в Notebook з прив'язкою до заданого контакту.
         Повертає ID створеної нотатки.
         """
         if contact_id not in self.data:
             raise KeyError(f"Контакт з ID={contact_id} не знайдено.")
-
         return nbook.create_and_add(
             text=text,
             tags=tags if tags else [],
             contact_ids=[contact_id]
         )
 
-class Notebook(BaseBook[Note]):
+class Notebook(BaseBook["Note"]):
     entry_class = Note
     entry_type_name = "нотатку"
 
-    def sort_by_date(self) -> List[Note]:
+    def sort_by_date(self) -> List["Note"]:
         return sorted(self.data.values(), key=lambda x: x.created_at)
 
-    def find_by_tag(self, tag: str) -> List[Note]:
+    def find_by_tag(self, tag: str) -> List["Note"]:
         tag_lower = tag.lower()
         return [note for note in self.data.values() if any(tag_lower in t.lower() for t in note.tags)]
 
-    def find_by_date(self, date_str: str) -> List[Note]:
+    def find_by_date(self, date_str: str) -> List["Note"]:
         try:
             target = datetime.strptime(date_str, "%Y-%m-%d").date()
         except ValueError:
-            raise ValueError("Дата повинна бути у форматі YYYY-MM-DD")
+            raise ValueError("Невірний формат дати. Використовуйте YYYY-MM-DD")
         return [n for n in self.data.values() if n.created_at.date() == target]
 
-    def find_by_contact_id(self, contact_id: int) -> List[Note]:
+    def find_by_contact_id(self, contact_id: int) -> List["Note"]:
         """Повертає список нотаток, прив'язаних до контакту з даним ID."""
         return [note for note in self.data.values() if contact_id in note.contact_ids]
+
+# ------------------------------------------------------
+# Допоміжні функції
+# ------------------------------------------------------
+def parse_birthday(bday: str) -> date:
+    """Парсить рядок дати народження у форматі ДД.ММ.РРРР або РРРР-ММ-ДД і повертає date()."""
+    fmt_candidates = ["%d.%m.%Y", "%Y-%m-%d"]
+    for fmt in fmt_candidates:
+        try:
+            parsed = datetime.strptime(bday, fmt).date()
+            return parsed
+        except ValueError:
+            continue
+    raise ValueError("Дата народження в неправильному форматі.")
+
+def validate_birthday_format(bday: str) -> bool:
+    """Лише перевіряє, чи рядок відповідає одному з форматів дати (не перевіряє адекватність)."""
+    for fmt in ["%d.%m.%Y", "%Y-%m-%d"]:
+        try:
+            datetime.strptime(bday, fmt)
+            return True
+        except ValueError:
+            continue
+    return False
+
+def validate_phone(phone: str) -> str:
+    """Перевірка правильності номера телефону формату +380XXXXXXXXX чи 0XXXXXXXXX."""
+    if re.fullmatch(r"\+380\d{9}", phone):
+        return phone
+    elif re.fullmatch(r"0\d{9}", phone):
+        return "+38" + phone
+    return ""
+
+def validate_email(email: str) -> bool:
+    return bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email))
+
+def normalize_name(name: str) -> str:
+    return " ".join(part.capitalize() for part in name.strip().split())
+
+# ------------------------------------------------------
+# Логіка збереження в .pkl для сесій
+# ------------------------------------------------------
+def save_all(abook: AddressBook, nbook: Notebook):
+    """
+    Зберігаємо **поточний** стан (in-memory) у pickle-файли SESSION_CONTACTS_FILE і SESSION_NOTES_FILE.
+    Якщо програма аварійно завершиться, при наступному запуску можна буде відновити.
+    """
+    with open(SESSION_CONTACTS_FILE, "wb") as f:
+        # Збережемо у pickle словник (dict) + _max_id
+        data = {
+            "raw": {str(eid): abook.data[eid].to_dict() for eid in abook.data},
+            "max_id": abook._max_id
+        }
+        pickle.dump(data, f)
+
+    with open(SESSION_NOTES_FILE, "wb") as f:
+        data = {
+            "raw": {str(eid): nbook.data[eid].to_dict() for eid in nbook.data},
+            "max_id": nbook._max_id
+        }
+        pickle.dump(data, f)
+
+def session_files_exist() -> bool:
+    return os.path.exists(SESSION_CONTACTS_FILE) or os.path.exists(SESSION_NOTES_FILE)
+
+def remove_session_files():
+    """Видаляємо тимчасові pkl-файли."""
+    if os.path.exists(SESSION_CONTACTS_FILE):
+        os.remove(SESSION_CONTACTS_FILE)
+    if os.path.exists(SESSION_NOTES_FILE):
+        os.remove(SESSION_NOTES_FILE)
+
+def load_from_session_files() -> (AddressBook, Notebook):
+    """
+    Завантажуємо AddressBook та Notebook з pickle-файлів.
+    Якщо вони відсутні/пошкоджені, повертаємо порожні.
+    """
+    abook = AddressBook()
+    nbook = Notebook()
+
+    if os.path.exists(SESSION_CONTACTS_FILE):
+        try:
+            with open(SESSION_CONTACTS_FILE, "rb") as f:
+                data = pickle.load(f)
+                raw = data["raw"]
+                max_id = data["max_id"]
+                for k, v in raw.items():
+                    entry = abook.entry_class.from_dict(v)
+                    abook.data[int(k)] = entry
+                abook._max_id = max_id
+        except:
+            pass
+
+    if os.path.exists(SESSION_NOTES_FILE):
+        try:
+            with open(SESSION_NOTES_FILE, "rb") as f:
+                data = pickle.load(f)
+                raw = data["raw"]
+                max_id = data["max_id"]
+                for k, v in raw.items():
+                    entry = nbook.entry_class.from_dict(v)
+                    nbook.data[int(k)] = entry
+                nbook._max_id = max_id
+        except:
+            pass
+
+    return abook, nbook
+
+def commit_session_to_json(abook: AddressBook, nbook: Notebook):
+    """
+    Фінальний крок: зберігаємо поточні дані (in-memory) у JSON (contacts.json, notes.json),
+    а потім видаляємо тимчасові .pkl.
+    """
+    abook.save(CONTACTS_FILE)
+    nbook.save(NOTES_FILE)
+    remove_session_files()
+
+# ------------------------------------------------------
+# Перевірка існування сесійних файлів / завантаження основних
+# ------------------------------------------------------
+def restore_or_load() -> (AddressBook, Notebook):
+    """
+    Якщо існують session.pkl — запитуємо у користувача, чи відновлювати.
+    Якщо так => вантажимо з pickle.
+    Якщо ні => видаляємо pickle-файли (якщо були) і вантажимо з JSON.
+    """
+    if session_files_exist():
+        print(Fore.YELLOW + "Виявлено незавершену сесію! Відновити? (Y/n)" + Style.RESET_ALL)
+        ans = input().strip().lower()
+        if ans in ("y", "yes", ""):
+            # Відновити
+            abook, nbook = load_from_session_files()
+            print(Fore.GREEN + "Сесію відновлено." + Style.RESET_ALL)
+            return abook, nbook
+        else:
+            # Відмовитися
+            remove_session_files()
+    # Якщо pickle-сесій немає або користувач відмовився => беремо JSON
+    abook = AddressBook.load(CONTACTS_FILE)
+    nbook = Notebook.load(NOTES_FILE)
+    return abook, nbook
 
 # ------------------------------------------------------
 # Декоратор для обробки помилок
@@ -488,14 +628,21 @@ def parse_contact_input(tokens: List[str]) -> Dict[str, Any]:
     birthday = None
 
     for token in tokens:
-        if not phone and validate_phone(token):
-            phone = validate_phone(token)
-        elif validate_email(token):
+        # Спочатку перевіряємо, чи телефон
+        possible_phone = validate_phone(token)
+        if not phone and possible_phone:
+            phone = possible_phone
+            continue
+        # чи емейл
+        if validate_email(token):
             emails.append(token)
-        elif validate_birthday(token):
+            continue
+        # чи день народження
+        if validate_birthday_format(token):
             birthday = token
-        else:
-            name_parts.append(token)
+            continue
+        # інакше припускаємо, що це частина імені
+        name_parts.append(token)
 
     name = " ".join(name_parts).strip()
     result = {"name": normalize_name(name)}
@@ -507,64 +654,38 @@ def parse_contact_input(tokens: List[str]) -> Dict[str, Any]:
         result["birthday"] = birthday
     return result
 
-# Перевірка правильності номера телефону формату +380XXXXXXXXX
-def validate_phone(phone: str) -> str:
-     if re.fullmatch(r"\+380\d{9}", phone):
-         return phone
-     elif re.fullmatch(r"0\d{9}", phone):
-         return "+38" + phone
-     return ""
- 
-# Перевірка правильності email
-def validate_email(email: str) -> bool:
-     return bool(re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email))
- 
-# Перевірка правильності формату дати
-def validate_birthday(bday: str) -> bool:
-     for fmt in ["%d.%m.%Y", "%Y-%m-%d"]:
-         try:
-             datetime.strptime(bday, fmt)
-             return True
-         except ValueError:
-             continue
-     return False
- 
-def normalize_name(name: str) -> str:
-     return " ".join(part.capitalize() for part in name.strip().split())
- 
+def save_all(abook: AddressBook, nbook: "Notebook"):
+    """Зберігаємо поточний стан обох книжок."""
+    abook.save(CONTACTS_FILE)
+    nbook.save(NOTES_FILE)
+
+# ------------------------------------------------------
+# Реалізація команд
+# ------------------------------------------------------
 @input_error
 def add_contact(args: List[str], abook: AddressBook, nbook: Notebook):
     """
-    add-contact [дані в один рядок] або інтерактивно.
-    Приклад рядком: add-contact John Galt 1234567890 john@example.com
-    Після створення пропонує створити нотатку для щойно доданого контакту.
+    add-contact:
+      - inline: add-contact John 0XXXXXXXXX john@e.com ...
+      - або інтерактивно, якщо не передали args
     """
     if args:
+        # inline
         data = parse_contact_input(args)
-        if "name" in data:
-            data["name"] = normalize_name(data["name"])  # нормалізація ім'я
-        if "phones" in data:
-            valid_phones = []
-            for p in data["phones"]:
-                norm_phone = validate_phone(p)
-                if norm_phone:
-                    valid_phones.append(norm_phone)
-                else:
-                    raise ValueError("Телефон має бути у форматі +380XXXXXXXXX або 0XXXXXXXXX")
-            data["phones"] = valid_phones
-        if not data.get("phones") and not data.get("emails") and not data.get("birthday"):
+        if not (data.get("phones") or data.get("emails") or data.get("birthday")):
             raise ValueError("Неможливо створити контакт без жодної валідної інформації: телефону, email або дати народження.")
     else:
+        # інтерактивно
         while True:
-            name = input("Enter full name: ").strip()
+            name = input("Enter contact name: ").strip()
             if name:
                 name = normalize_name(name)
                 break
             print(Fore.RED + "Ім'я не може бути порожнім." + Style.RESET_ALL)
-        
+
         phones = []
-        while True:    
-            phone = input("Enter phone (optional, format +380XXXXXXXXX or 0XXXXXXXXX): ").strip()
+        while True:
+            phone = input("Enter phone (optional, +380XXXXXXXXX або 0XXXXXXXXX): ").strip()
             if not phone:
                 break
             norm = validate_phone(phone)
@@ -572,31 +693,46 @@ def add_contact(args: List[str], abook: AddressBook, nbook: Notebook):
                 phones = [norm if isinstance(norm, str) else str(norm)]
                 break
             print(Fore.RED + "Телефон має бути у форматі +380XXXXXXXXX або 0XXXXXXXXX." + Style.RESET_ALL)
-        
+
         emails = []
         while True:
-            emails_str = input("Enter emails (optional, separated by space): ").strip()
+            emails_str = input("Enter emails (optional, розділені пробілом): ").strip()
             if not emails_str:
                 break
             emails = emails_str.split()
             if all(validate_email(e) for e in emails):
                 break
-            print(Fore.RED + "Один або кілька email некоректні. Спробуйте ще раз." + Style.RESET_ALL)
-        
+            print(Fore.RED + "Некоректний email. Спробуйте ще раз." + Style.RESET_ALL)
+
         birthday = None
         while True:
-            birthday_input = input("Enter birthday (optional, DD.MM.YYYY or YYYY-MM-DD): ").strip()
-            if not birthday_input:
+            bday_input = input("Enter birthday (optional, DD.MM.YYYY або YYYY-MM-DD): ").strip()
+            if not bday_input:
                 break
-            if validate_birthday(birthday_input):
-                birthday = birthday_input
-                break
-            print(Fore.RED + "Неправильний формат дати. Спробуйте ще раз." + Style.RESET_ALL)
+            if validate_birthday_format(bday_input):
+                parsed = parse_birthday(bday_input)
+                # Перевірка на майбутнє
+                if parsed > date.today():
+                    confirm = input(Fore.YELLOW +
+                                    f"Дата {parsed} більше за поточну. Підтвердити? [Y/n]: " +
+                                    Style.RESET_ALL).strip().lower()
+                    if confirm not in ("n", "no"):
+                        birthday = bday_input
+                        break
+                    else:
+                        # повторне коло
+                        continue
+                else:
+                    birthday = bday_input
+                    break
+            else:
+                print(Fore.RED + "Неправильний формат дати. Спробуйте ще раз." + Style.RESET_ALL)
+
         data = {"name": name}
-        if phone:
+        if phones:
             data["phones"] = phones
-        if emails_str:
-            data["emails"] = emails_str.split()
+        if emails:
+            data["emails"] = emails
         if birthday:
             data["birthday"] = birthday
 
@@ -605,38 +741,33 @@ def add_contact(args: List[str], abook: AddressBook, nbook: Notebook):
     block = format_contact(contact_obj)
     print_colored_box(f"Contact added (ID={new_id})", block.split("\n"))
 
-    # -------------------------------
     # Пропонуємо одразу створити нотатку
     choice = input("Create a note for this contact? [Y/n]: ").strip().lower()
     if choice in ("", "y", "yes"):
         note_text = input("Enter note text: ").strip()
         if not note_text:
-            print(Fore.YELLOW + "No note text entered, skip note creation." + Style.RESET_ALL)
-            return
-        tags_input = input("Enter #tags (optional, separated by space): ").strip()
-        tags = [t.lstrip('#') for t in tags_input.split()] if tags_input else []
+            print(Fore.YELLOW + "Порожній текст. Пропускаємо створення нотатки." + Style.RESET_ALL)
+        else:
+            tags_input = input("Enter #tags (optional, через пробіл): ").strip()
+            tags = [t.lstrip('#') for t in tags_input.split()] if tags_input else []
+            note_id = abook.create_note_for_contact(nbook, new_id, note_text, tags=tags)
+            note_obj = nbook.find_by_id(note_id)
+            note_block = format_note(note_obj)
+            # Для наочності додамо ім'я контакту в блок
+            note_lines = note_block.split("\n")
+            note_lines.insert(1, f"{Fore.MAGENTA}Linked contact:{Style.RESET_ALL} {contact_obj.name}")
+            note_block = "\n".join(note_lines)
+            print_colored_box(
+                f"New note for contact (ID={new_id}, note ID={note_id})",
+                note_block.split("\n")
+            )
 
-        note_id = abook.create_note_for_contact(
-            nbook=nbook,
-            contact_id=new_id,
-            text=note_text,
-            tags=tags
-        )
-        note_obj = nbook.find_by_id(note_id)
-        note_block = format_note(note_obj)
-        # Для наочності додамо ім'я контакту в блок:
-        note_lines = note_block.split("\n")
-        note_lines.insert(1, f"{Fore.MAGENTA}Linked contact:{Style.RESET_ALL} {contact_obj.name}")
-        note_block = "\n".join(note_lines)
-        print_colored_box(
-            f"New note for contact (ID={new_id}, note ID={note_id})",
-            note_block.split("\n")
-        )
-    else:
-        print("Skip note creation.")
+    # Збереження
+    save_all(abook, nbook)
 
 @input_error
 def list_contacts(args: List[str], abook: AddressBook):
+    """list-contacts: виводимо всі контакти."""
     if not abook.data:
         print(Fore.YELLOW + "У книзі немає контактів." + Style.RESET_ALL)
         return
@@ -660,40 +791,61 @@ def search_contact(args: List[str], abook: AddressBook):
         print_colored_box(f"Contact ID={c.id}", block.split("\n"))
 
 @input_error
-def edit_contact(args: List[str], abook: AddressBook):
-    if len(args) < 2:
-        raise ValueError("Використання: edit-contact <id> поле=значення ...")
-    id_val = int(args[0])
-    changes = {"phones": [], "emails": []}
-    name_parts = []
-    
-    for token in args[1:]:
-        if validate_phone(token):
-            changes["phones"].append(validate_phone(token))
-        elif validate_email(token):
-            changes["emails"].append(token)
-        elif validate_birthday(token):
-            changes["birthday"] = token
-        else:
-            name_parts.append(token)
+def edit_contact(args: List[str], abook: AddressBook, nbook: Notebook):
+    if not args:
+        # інтерактив
+        id_val = int(input("Enter contact ID to edit: ").strip())
+        c = abook.find_by_id(id_val)
+        new_name = input("Enter new name (ENTER=skip): ").strip()
+        if new_name:
+            c.name = normalize_name(new_name)
 
-    if name_parts:
-        changes["name"] = normalize_name(" ".join(name_parts))
+        new_phones = []
+        while True:
+            p = input("Enter phone (ENTER=skip, 'stop'=кінець): ").strip()
+            if not p or p.lower() == "stop":
+                break
+            valid = validate_phone(p)
+            if valid:
+                new_phones.append(valid)
+            else:
+                print(Fore.RED + "Невірний формат телефону!" + Style.RESET_ALL)
+        if new_phones:
+            c.phones = new_phones
 
-    if not changes["phones"]:
-        del changes["phones"]
-    if not changes["emails"]:
-        del changes["emails"]   
+        new_emails = []
+        while True:
+            e = input("Enter email (ENTER=skip, 'stop'=кінець): ").strip()
+            if not e or e.lower() == "stop":
+                break
+            if validate_email(e):
+                new_emails.append(e)
+            else:
+                print(Fore.RED + "Невірний формат email!" + Style.RESET_ALL)
+        if new_emails:
+            c.emails = new_emails
 
+        b = input("Enter birthday (ENTER=skip): ").strip()
+        if b:
+            if validate_birthday_format(b):
+                c.birthday = parse_birthday(b)
+            else:
+                print(Fore.RED + "Невірний формат дати. Пропускаємо." + Style.RESET_ALL)
+    else:
+        # inline
+        id_val = int(args[0])
+        tokens = args[1:]
+        changes = parse_contact_input(tokens)
+        abook.edit(id_val, **changes)
 
-    abook.edit(id_val, **changes)
-    print(Fore.GREEN + f"Контакт ID={id_val} відредаговано." + Style.RESET_ALL)
+    print(Fore.GREEN + "Контакт відредаговано." + Style.RESET_ALL)
+    save_all(abook, nbook)
 
 @input_error
-def delete_contact(args: List[str], abook: AddressBook, nbook: "Notebook"):
+def delete_contact(args: List[str], abook: AddressBook, nbook: Notebook):
+    """delete-contact <id|name> — видаляє контакт (і пропонує, що робити з пов'язаними нотатками)."""
     if not args:
-        raise ValueError("Використання: delete-contact <id>")
-    
+        raise ValueError("Введіть ID контакту чи ім'я для видалення:")
     identifier = " ".join(args).strip()
     if identifier.isdigit():
         id_val = int(identifier)
@@ -712,12 +864,13 @@ def delete_contact(args: List[str], abook: AddressBook, nbook: "Notebook"):
             for c in matches:
                 print(f"  ID={c.id}: {c.name}")
             print(Fore.CYAN + "Уточніть ID для видалення." + Style.RESET_ALL)
-            print("Використайте команду: delete-contact <ID>")
+            print("Використайте команду: delete-contact ID")
             return
         else:
             contact = matches[0]
-            id_val = contact.id
 
+    id_val = contact.id
+    # Перевірка нотаток
     linked_notes = nbook.find_by_contact_id(id_val)
     if linked_notes:
         note_ids = [note.id for note in linked_notes]
@@ -742,9 +895,12 @@ def delete_contact(args: List[str], abook: AddressBook, nbook: "Notebook"):
         print(Fore.GREEN + f"Контакт ID={id_val} видалено." + Style.RESET_ALL)
     else:
         print(Fore.RED + f"Контакт ID={id_val} не знайдено." + Style.RESET_ALL)
+    # збереження
+    save_all(abook, nbook)
 
 @input_error
 def upcoming_birthdays(args: List[str], abook: AddressBook):
+    """birthdays [days=7] — контакти з ДН протягом вказаної кількості днів."""
     days = 7
     if args and args[0].startswith("days="):
         try:
@@ -753,28 +909,31 @@ def upcoming_birthdays(args: List[str], abook: AddressBook):
             pass
     results = abook.get_upcoming_birthdays(days_ahead=days)
     if not results:
-        print(Fore.CYAN + f"Немає ДН протягом {days} днів." + Style.RESET_ALL)
+        print(Fore.CYAN + f"Немає Дня народження протягом {days} днів." + Style.RESET_ALL)
         return
-    print(Fore.GREEN + f"Найближчі ДН протягом {days} днів:" + Style.RESET_ALL)
+    print(Fore.GREEN + f"Найближчі Дні народження протягом {days} днів:" + Style.RESET_ALL)
     for c in results:
         block = format_contact(c)
         print_colored_box(f"Contact ID={c.id}", block.split("\n"))
 
 @input_error
-def undo_contact(args: List[str], abook: AddressBook):
+def undo_contact(args: List[str], abook: AddressBook, nbook: Notebook):
+    """undo-contact — скасування останньої дії з контактами."""
     msg = abook.undo()
     print(msg)
+    save_all(abook, nbook)
 
 # ------------------------------------------------------
 # Команди для роботи з нотатками
 # ------------------------------------------------------
 @input_error
-def add_note(args: List[str], nb: Notebook):
+def add_note(args: List[str], nb: Notebook, abook: AddressBook):
     """
     add-note [дані в один рядок] або інтерактивно.
-    Приклад рядком: add-note Привіт, світ! #tag1 #tag2
+    Приклад: add-note Привіт, світ! #tag1 #tag2
     """
     if args:
+        # inline
         text_parts = [arg for arg in args if not arg.startswith('#')]
         tags = [arg.lstrip('#') for arg in args if arg.startswith('#')]
         text = " ".join(text_parts).strip()
@@ -782,7 +941,10 @@ def add_note(args: List[str], nb: Notebook):
             raise ValueError("Текст нотатки не може бути порожнім.")
         data = {"text": text, "tags": tags, "contact_ids": []}
     else:
+        # інтерактивно
         text = input("Enter text: ").strip()
+        if not text:
+            raise ValueError("Текст нотатки не може бути порожнім.")
         tags_input = input("Enter #tag (optional): ").strip()
         tags = [t.lstrip('#') for t in tags_input.split()] if tags_input else []
         data = {"text": text, "tags": tags, "contact_ids": []}
@@ -792,8 +954,12 @@ def add_note(args: List[str], nb: Notebook):
     block = format_note(note_obj)
     print_colored_box(f"Note added (ID={new_id})", block.split("\n"))
 
+    # збереження
+    save_all(abook, nb)
+
 @input_error
 def list_notes(args: List[str], nb: Notebook, abook: AddressBook = None):
+    """list-notes — виводить усі нотатки, показує прив’язані контакти."""
     if not nb.data:
         print(Fore.YELLOW + "Нотаток ще немає." + Style.RESET_ALL)
         return
@@ -817,7 +983,8 @@ def list_notes(args: List[str], nb: Notebook, abook: AddressBook = None):
         print_colored_box(f"Note ID={note.id}", block.split("\n"))
 
 @input_error
-def search_note(args: List[str], nb: Notebook, abook: AddressBook = None):
+def search_note(args: List[str], nb: Notebook, abook: AddressBook):
+    """search-note <query> — пошук нотаток за текстом/тегами та контактами."""
     if not args:
         raise ValueError("Використання: search-note <query>")
     query = " ".join(args).lower()
@@ -827,13 +994,12 @@ def search_note(args: List[str], nb: Notebook, abook: AddressBook = None):
     text_matches = nb.find(query)
     results.extend(text_matches)
 
-    # 2. Якщо маємо адресну книгу, шукаємо контакти, де ім'я/телефон/емейл містить query
-    if abook:
-        contact_matches = abook.find(query)
-        for contact in contact_matches:
-            # додаємо нотатки, що прив'язані до цього контакту
-            for note in nb.find_by_contact_id(contact.id):
-                results.append(note)
+    # 2. Якщо є abook, шукаємо контакти за query
+    contact_matches = abook.find(query)
+    for contact in contact_matches:
+        # додаємо нотатки, прив'язані до цього контакту
+        for note in nb.find_by_contact_id(contact.id):
+            results.append(note)
 
     # Усуваємо дублікати
     unique_results = {}
@@ -848,7 +1014,7 @@ def search_note(args: List[str], nb: Notebook, abook: AddressBook = None):
     print(Fore.GREEN + f"Знайдено {len(results)} нотаток за запитом '{query}':" + Style.RESET_ALL)
     for n in results:
         block = format_note(n)
-        if abook and n.contact_ids:
+        if n.contact_ids:
             contact_names = []
             for cid in n.contact_ids:
                 try:
@@ -863,28 +1029,38 @@ def search_note(args: List[str], nb: Notebook, abook: AddressBook = None):
         print_colored_box(f"Note ID={n.id}", block.split("\n"))
 
 @input_error
-def edit_note(args: List[str], nb: Notebook):
-    if len(args) < 2:
-        raise ValueError("Використання: edit-note <id> поле=значення ...")
-    id_val = int(args[0])
-    changes = {}
-    for chunk in args[1:]:
-        if "=" in chunk:
-            key, val = chunk.split("=", 1)
-            key = key.strip()
-            val = val.strip().strip('"').strip("'")
-            if key == "tags":
-                changes[key] = [x.strip().lstrip('#') for x in val.split(",")]
-            elif key == "contact_ids":
-                # contact_ids=1,2
-                changes[key] = [int(x) for x in re.split(r"[,;\s]+", val) if x.isdigit()]
-            else:
-                changes[key] = val
-    nb.edit(id_val, **changes)
-    print(Fore.GREEN + f"Нотатку ID={id_val} відредаговано." + Style.RESET_ALL)
+def edit_note(args: List[str], nb: Notebook, abook: AddressBook):
+    if not args:
+        id_val = int(input("Укажіть ID нотатки для редагування: ").strip())
+        note = nb.find_by_id(id_val)
+        new_text = input("Enter new text (ENTER=skip): ").strip()
+        if new_text:
+            note.text = new_text
+        new_tags = input("Введіть нові теги (через пробіл, ENTER=skip): ").strip()
+        if new_tags:
+            note.tags = [t.lstrip('#') for t in new_tags.split()]
+        print(Fore.GREEN + f"Note ID={id_val} updated." + Style.RESET_ALL)
+    else:
+        id_val = int(args[0])
+        changes = {}
+        for chunk in args[1:]:
+            if "=" in chunk:
+                key, val = chunk.split("=", 1)
+                key = key.strip()
+                val = val.strip().strip('"').strip("'")
+                if key == "tags":
+                    changes[key] = [x.strip().lstrip('#') for x in val.split(",")]
+                elif key == "contact_ids":
+                    changes[key] = [int(x) for x in re.split(r"[,;\s]+", val) if x.isdigit()]
+                else:
+                    changes[key] = val
+        nb.edit(id_val, **changes)
+
+    save_all(abook, nb)
 
 @input_error
-def delete_note(args: List[str], nb: Notebook):
+def delete_note(args: List[str], nb: Notebook, abook: AddressBook):
+    """delete-note <id> — видаляє нотатку за ID."""
     if not args:
         raise ValueError("Використання: delete-note <id>")
     id_val = int(args[0])
@@ -892,13 +1068,40 @@ def delete_note(args: List[str], nb: Notebook):
         print(Fore.GREEN + f"Нотатку ID={id_val} видалено." + Style.RESET_ALL)
     else:
         print(Fore.RED + f"Нотатку ID={id_val} не знайдено." + Style.RESET_ALL)
+    save_all(abook, nb)
 
 @input_error
-def sort_notes_by_date(args: List[str], nb: Notebook, abook: AddressBook = None):
+def pin_note(args: List[str], nb: Notebook, abook: AddressBook):
+    if not args:
+        id_val = int(input("Note ID to pin: ").strip())
+    else:
+        id_val = int(args[0])
+    note = nb.find_by_id(id_val)
+    if "📌" not in note.tags:
+        note.tags.append("📌")
+    print(Fore.GREEN + f"Note ID={id_val} pinned." + Style.RESET_ALL)
+    save_all(abook, nb)
+
+@input_error
+def list_pinned_notes(args: List[str], nb: Notebook, abook: AddressBook):
+    pinned = nb.find_by_tag("📌")
+    if not pinned:
+        print(Fore.CYAN + "Немає закріплених нотаток." + Style.RESET_ALL)
+        return
+    for n in pinned:
+        lines = [
+            f"Text: {n.text}",
+            f"Tags: {', '.join(n.tags)}"
+        ]
+        print_colored_box(f"Note ID={n.id}", lines)
+
+@input_error
+def sort_notes_by_date(args: List[str], nb: Notebook, abook: AddressBook):
+    """sort-by-date — сортує нотатки за датою створення."""
     sorted_list = nb.sort_by_date()
     for note in sorted_list:
         block = format_note(note)
-        if abook and note.contact_ids:
+        if note.contact_ids:
             contact_names = []
             for cid in note.contact_ids:
                 try:
@@ -914,6 +1117,7 @@ def sort_notes_by_date(args: List[str], nb: Notebook, abook: AddressBook = None)
 
 @input_error
 def search_note_by_tag(args: List[str], nb: Notebook, abook: AddressBook = None):
+    """search-tag <tag> — пошук нотаток за тегом."""
     if not args:
         raise ValueError("Використання: search-tag <tag>")
     tag = args[0]
@@ -924,7 +1128,7 @@ def search_note_by_tag(args: List[str], nb: Notebook, abook: AddressBook = None)
     print(Fore.GREEN + f"Знайдено {len(results)} нотаток з тегом '{tag}':" + Style.RESET_ALL)
     for n in results:
         block = format_note(n)
-        if abook and n.contact_ids:
+        if n.contact_ids:
             contact_names = []
             for cid in n.contact_ids:
                 try:
@@ -940,6 +1144,7 @@ def search_note_by_tag(args: List[str], nb: Notebook, abook: AddressBook = None)
 
 @input_error
 def search_note_by_date(args: List[str], nb: Notebook, abook: AddressBook = None):
+    """search-date <YYYY-MM-DD> — пошук нотаток за датою створення."""
     if not args:
         raise ValueError("Використання: search-date <YYYY-MM-DD>")
     date_str = args[0]
@@ -950,7 +1155,7 @@ def search_note_by_date(args: List[str], nb: Notebook, abook: AddressBook = None
     print(Fore.GREEN + f"Знайдено {len(results)} нотаток за {date_str}:" + Style.RESET_ALL)
     for n in results:
         block = format_note(n)
-        if abook and n.contact_ids:
+        if n.contact_ids:
             contact_names = []
             for cid in n.contact_ids:
                 try:
@@ -965,77 +1170,187 @@ def search_note_by_date(args: List[str], nb: Notebook, abook: AddressBook = None
         print_colored_box(f"Note ID={n.id}", block.split("\n"))
 
 @input_error
-def undo_note(args: List[str], nb: Notebook):
+def undo_note(args: List[str], nb: Notebook, abook: AddressBook):
+    """undo-note — скасування останньої дії з нотатками."""
     msg = nb.undo()
     print(msg)
+    save_all(abook, nb)
+
+@input_error
+def list_tags(args: List[str], nb: Notebook):
+    """
+    list-tags [<filter>] — виводить усі унікальні теги з нотаток.
+    Можливий фільтр: "date" або "desc" (сортування за датою),
+    або підрядок (для пошуку).
+    """
+    tag_dict = defaultdict(list)
+
+    for note in nb.data.values():
+        for tag in note.tags:
+            tag_dict[tag].append(note.created_at)
+
+    if not tag_dict:
+        print(Fore.CYAN + "Жодного тегу не знайдено." + Style.RESET_ALL)
+        return
+
+    filter_value = args[0] if args else None
+    result = list(tag_dict.keys())
+
+    if filter_value and filter_value.lower() not in ("date", "desc"):
+        # фільтр за частиною слова
+        result = [tag for tag in result if filter_value.lower() in tag.lower()]
+    elif filter_value == "date":
+        # сортуємо за найстаршою датою, де цей тег з’явився
+        result.sort(key=lambda t: min(tag_dict[t]))
+    elif filter_value == "desc":
+        # за найстаршою датою у зворотному порядку
+        result.sort(key=lambda t: min(tag_dict[t]), reverse=True)
+
+    print(Fore.GREEN + "Унікальні теги:" + Style.RESET_ALL)
+    for tag in result:
+        count = len(tag_dict[tag])
+        print(f"• {tag} ({count} нот.)")
+
+# ------------------------------------------------------
+# Багаторівневий Completer
+# ------------------------------------------------------
+class MultiLevelCompleter(Completer):
+    """
+    Приклад мінімального багаторівневого автодоповнення:
+    - Якщо користувач набирає перше слово, пропонуємо список команд.
+    - Якщо вже набрали команду, пропонуємо певні ключі для аргументів.
+    """
+
+    def __init__(self, commands, subcommands_map):
+        super().__init__()
+        self.commands = commands  # перелік основних команд
+        self.subcommands_map = subcommands_map  # dict{"edit-note": ["text=", "tags=", ...], ...}
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor.lstrip()
+        tokens = text.split()
+
+        # Якщо нічого не введено - пропонуємо усі команди
+        if len(tokens) == 0:
+            for cmd in self.commands:
+                yield Completion(cmd, start_position=0)
+            return
+
+        # Якщо введено 1 слово (можливо, частина команди)
+        if len(tokens) == 1:
+            partial_cmd = tokens[0].lower()
+            for cmd in self.commands:
+                if cmd.startswith(partial_cmd):
+                    yield Completion(cmd, start_position=-len(partial_cmd))
+            return
+
+        # Якщо введено 2+ слова: перший токен — команда
+        command = tokens[0].lower()
+        # Можемо підказувати аргументи
+        if command in self.subcommands_map:
+            possible_args = self.subcommands_map[command]
+            current_arg = tokens[-1]
+            for arg in possible_args:
+                if arg.startswith(current_arg):
+                    yield Completion(arg, start_position=-len(current_arg))
+
 
 # ------------------------------------------------------
 # Головна функція
 # ------------------------------------------------------
-
 def main():
-    abook = AddressBook.load(CONTACTS_FILE)
-    nbook = Notebook.load(NOTES_FILE)
+    # Спробуємо відновити сесію або завантажити основні JSON
+    abook, nbook = restore_or_load()
 
-    # Зверніть увагу: тепер ми в деякі функції передаємо кортеж (abook, nbook)
     COMMANDS = {
         # Контакти
         "add-contact": (lambda args: add_contact(args, abook, nbook)),
         "list-contacts": (lambda args: list_contacts(args, abook)),
         "search-contact": (lambda args: search_contact(args, abook)),
-        "edit-contact": (lambda args: edit_contact(args, abook)),
+        "edit-contact": (lambda args: edit_contact(args, abook, nbook)),
         "delete-contact": (lambda args: delete_contact(args, abook, nbook)),
         "birthdays": (lambda args: upcoming_birthdays(args, abook)),
-        "undo-contact": (lambda args: undo_contact(args, abook)),
-      
+        "undo-contact": (lambda args: undo_contact(args, abook, nbook)),
+
         # Нотатки
-        "add-note": (lambda args: add_note(args, nbook)),
+        "add-note": (lambda args: add_note(args, nbook, abook)),
         "list-notes": (lambda args: list_notes(args, nbook, abook)),
         "search-note": (lambda args: search_note(args, nbook, abook)),
-        "edit-note": (lambda args: edit_note(args, nbook)),
-        "delete-note": (lambda args: delete_note(args, nbook)),
+        "edit-note": (lambda args: edit_note(args, nbook, abook)),
+        "delete-note": (lambda args: delete_note(args, nbook, abook)),
         "sort-by-date": (lambda args: sort_notes_by_date(args, nbook, abook)),
         "search-tag": (lambda args: search_note_by_tag(args, nbook, abook)),
         "search-date": (lambda args: search_note_by_date(args, nbook, abook)),
-        "undo-note": (lambda args: undo_note(args, nbook)),
+        "undo-note": (lambda args: undo_note(args, nbook, abook)),
         "list-tags": (lambda args: list_tags(args, nbook)),
+
+        # Додаткові
+        "delete-note-text": (lambda args: delete_note_by_text(args, nbook, abook)),
+        "pin-note": (lambda args: pin_note(args, nbook, abook)),
+        "list-pinned": (lambda args: list_pinned_notes(args, nbook, abook)),
     }
 
+    # Дані для help
     help_data_contacts = [
-        ["add-contact", "Додати контакт (inline/інтерактивно), з можливістю створити нотатку"],
+        ["add-contact", "Додати контакт (inline/інтерактивно) з можливістю одразу створити нотатку"],
         ["list-contacts", "Список всіх контактів"],
-        ["search-contact", "Пошук контакту за всіма полями"],
-        ["edit-contact", "Редагувати контакт: edit-contact <id> поле=значення"],
-        ["delete-contact", "Видалити контакт за ID або ім’ям (з обробкою пов'язаних нотаток)"],
-        ["birthdays", "Контакти з ДН через N днів (за замовчуванням 7), приклад: birthdays days=10"],
+        ["search-contact", "Пошук контакту (inline/інтерактивно)"],
+        ["edit-contact", "Редагувати контакт (inline/інтерактивно)"],
+        ["delete-contact", "Видалити контакт (inline/інтерактивно)"],
+        ["birthdays", "Контакти з Днями народження у найближчі (за замовчуванням 7) днів: birthdays days=7"],
         ["undo-contact", "Скасувати останню дію з контактами"]
     ]
 
     help_data_notes = [
         ["add-note", "Додати нотатку (inline/інтерактивно)"],
-        ["list-notes", "Список усіх нотаток (відображає прив'язані контакти)"],
-        ["search-note", "Пошук нотатки (текст/теги + ім'я контакту)"],
-        ["edit-note", "Редагувати нотатку: edit-note <id> поле=значення (text=, tags=, contact_ids=)"],
-        ["delete-note", "Видалити нотатку за ID"],
+        ["list-notes", "Список усіх нотаток (з відображенням прив'язаних контактів)"],
+        ["search-note", "Пошук нотатки (inline/інтерактив) за текстом/тегами, а також за контактами"],
+        ["edit-note", "Редагувати нотатку (inline/інтерактив): edit-note <id> text=... tags=... contact_ids=..."],
+        ["delete-note", "Видалити нотатку за ID."],
         ["sort-by-date", "Сортувати нотатки за датою створення"],
-        ["search-tag", "Пошук нотаток за тегом"],
+        ["search-tag", "Пошук нотаток за тегом (inline/інтерактив)"],
         ["search-date", "Пошук нотаток за датою (YYYY-MM-DD)"],
         ["undo-note", "Скасувати останню дію з нотатками"],
-        ["list-tags", "Показати всі унікальні теги з фільтрацією або сортуванням"]
+        ["list-tags", "Список усіх тегів (з фільтром або без)"],
+        ["delete-note-text", "Видалити всі нотатки, що містять заданий текст"],
+        ["pin-note", "Закріпити нотатку (додає тег 📌)"],
+        ["list-pinned", "Показати всі закріплені нотатки"]
     ]
 
     help_data_general = [
         ["help", "Вивести список команд"],
-        ["exit", "Вийти з програми (зберегти дані)"],
-        ["close", "Альтернативна команда виходу"]
+        ["exit / close", "Вийти з програми (зберегти дані)"]
     ]
 
     # Список команд для автодоповнення
     all_commands = list(COMMANDS.keys()) + ["help", "exit", "close"]
-    command_completer = WordCompleter(all_commands, ignore_case=True)
 
-    # Використовуємо чистий рядок для PromptSession
-    session = PromptSession(">>> ", completer=command_completer)
+    # Словник зі списком можливих "ключів" для автодоповнення другого рівня
+    subcommands_map = {
+        "add-contact": ["name", "phones=", "emails=", "birthday="],
+        "list-contacts": [],
+        "search-contact": [],
+        "edit-contact": ["<id>", "phones=", "emails=", "birthday="],
+        "delete-contact": ["<id>"],
+        "birthdays": ["days="],
+        "undo-contact": [],
+        "add-note": ["<text>", "#tag"],
+        "list-notes": [],
+        "search-note": [],
+        "edit-note": ["<id>", "text=", "tags=", "contact_ids="],
+        "delete-note": ["<id>"],
+        "sort-by-date": [],
+        "search-tag": ["<tag>"],
+        "search-date": ["YYYY-MM-DD"],
+        "undo-note": [],
+        "list-tags": ["date", "desc"],
+        "delete-note-text": ["<query>"],
+        "pin-note": ["<id>"],
+        "list-pinned": []
+    }
+
+    custom_completer = MultiLevelCompleter(all_commands, subcommands_map)
+    session = PromptSession(">>> ", completer=custom_completer)
 
     print(Fore.GREEN + "Вітаю! Це ваш персональний помічник." + Style.RESET_ALL)
     print("Наберіть 'help' для списку команд.")
@@ -1051,8 +1366,8 @@ def main():
         if command in ["exit", "close"]:
             print(Fore.YELLOW + "До побачення! Зберігаю дані..." + Style.RESET_ALL)
             # Зберігаємо дані перед виходом
-            abook.save(CONTACTS_FILE)
-            nbook.save(NOTES_FILE)
+            commit_session_to_json(abook, nbook)
+            print(Fore.YELLOW + "Готово! До побачення." + Style.RESET_ALL)
             break
         elif command == "help":
             print(format_help_table(help_data_contacts, "Contact Management"))
@@ -1068,94 +1383,7 @@ def main():
             if suggestions:
                 print(Fore.CYAN + f"Команду не знайдено. Можливо, ви мали на увазі: {suggestions[0]}?" + Style.RESET_ALL)
             else:
-                print(Fore.RED + "Невідома команда. Спробуйте 'help' для списку команд." + Style.RESET_ALL)
-
-@input_error
-def delete_note_by_text(args: List[str], nb: Notebook):
-    """
-    delete-note-text <query>
-    Видаляє всі нотатки, що містять текст або його частину.
-    """
-    if not args:
-        raise ValueError("Використання: delete-note-text <query>")
-    query = " ".join(args)
-    matches = nb.find(query)
-    if not matches:
-        print(Fore.CYAN + "Нотатку не знайдено." + Style.RESET_ALL)
-        return
-    for note in matches:
-        nb.delete(note.id)
-        print(Fore.GREEN + f"Нотатку ID={note.id} видалено." + Style.RESET_ALL)
-
-
-@input_error
-def pin_note(args: List[str], nb: Notebook):
-    """
-    pin-note <id>
-    Додає тег 📌 до нотатки для закріплення.
-    """
-    if not args:
-        raise ValueError("Використання: pin-note <id>")
-    id_val = int(args[0])
-    note = nb.find_by_id(id_val)
-    if "📌" not in note.tags:
-        note.tags.append("📌")
-    print(Fore.GREEN + f"Нотатку ID={id_val} закріплено." + Style.RESET_ALL)
-
-@input_error
-def list_pinned_notes(args: List[str], nb: Notebook):
-    """
-    list-pinned
-    Виводить усі нотатки з тегом 📌.
-    """
-    results = nb.find_by_tag("📌")
-    if not results:
-        print(Fore.CYAN + "Закріплених нотаток немає." + Style.RESET_ALL)
-        return
-    print(Fore.GREEN + f"Знайдено {len(results)} закріплених нотаток:" + Style.RESET_ALL)
-    for note in results:
-        block = format_note(note)
-        print_colored_box(f"Note ID={note.id}", block.split("\n"))
-
-@input_error
-def list_tags(args: List[str], nb: Notebook):
-    """
-    list-tags [<filter>]
-    Виводить усі унікальні теги, доступні в нотатках.
-    Можна відсортувати за датою або знайти за частковим збігом слова.
-    """
-    from collections import defaultdict
-
-    tag_dict = defaultdict(list)  # тег -> список дат
-
-    for note in nb.data.values():
-        for tag in note.tags:
-            tag_dict[tag].append(note.created_at)
-
-    if not tag_dict:
-        print(Fore.CYAN + "Жодного тегу не знайдено." + Style.RESET_ALL)
-        return
-
-    filter_value = args[0] if args else None
-    result = list(tag_dict.keys())
-
-    # Фільтр за частиною слова
-    if filter_value and filter_value.lower() not in ("date", "desc", "asc"):
-        result = [tag for tag in result if filter_value.lower() in tag.lower()]
-
-    # Сортування за датою
-    elif filter_value == "date":
-        result.sort(key=lambda tag: min(tag_dict[tag]))
-
-    elif filter_value == "desc":
-        result.sort(key=lambda tag: min(tag_dict[tag]), reverse=True)
-
-    # Вивід
-    print(Fore.GREEN + "Унікальні теги:" + Style.RESET_ALL)
-    for tag in result:
-        count = len(tag_dict[tag])
-        print(f"• {tag} ({count} нот.)")
-
+                print(Fore.RED + "Невідома команда. Наберіть 'help' для списку команд." + Style.RESET_ALL)
 
 if __name__ == "__main__":
     main()
