@@ -1,11 +1,4 @@
 {
-    "1": {
-        "id": 1,
-        "name": "Max 098647584 23021982",
-        "phones": [],
-        "emails": [],
-        "birthday": null
-    },
     "2": {
         "id": 2,
         "name": "Max",
@@ -32,5 +25,14 @@
         "phones": [],
         "emails": [],
         "birthday": null
+    },
+    "5": {
+        "id": 5,
+        "name": "Andriy",
+        "phones": [
+            "+380695269458"
+        ],
+        "emails": [],
+        "birthday": "1989-12-23"
     }
 }

@@ -1,1 +1,14 @@
-{}
+{
+    "1": {
+        "id": 1,
+        "text": "#work #friend let work together",
+        "tags": [
+            "work",
+            "friend"
+        ],
+        "contact_ids": [
+            5
+        ],
+        "created_at": "2025-04-13 08:44:40"
+    }
+}
