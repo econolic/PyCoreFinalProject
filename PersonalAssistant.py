@@ -1254,7 +1254,6 @@ class MultiLevelCompleter(Completer):
                 if arg.startswith(current_arg):
                     yield Completion(arg, start_position=-len(current_arg))
 
-
 # ------------------------------------------------------
 # Головна функція
 # ------------------------------------------------------
