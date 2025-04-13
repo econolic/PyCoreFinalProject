@@ -429,6 +429,9 @@ class AddressBook(BaseBook["Contact"]):
             contact_ids=[contact_id]
         )
 
+    def get_contact_ids(self) -> List[str]:
+        return [str(contact.id) for contact in self.data.values()]
+
 class Notebook(BaseBook["Note"]):
     entry_class = Note
     entry_type_name = "нотатку"
@@ -451,6 +454,11 @@ class Notebook(BaseBook["Note"]):
         """Повертає список нотаток, прив'язаних до контакту з даним ID."""
         return [note for note in self.data.values() if contact_id in note.contact_ids]
 
+    def get_unique_tags(self) -> List[str]:
+            tags = set()
+            for note in self.data.values():
+                tags.update(note.tags)
+            return list(tags)
 # ------------------------------------------------------
 # Допоміжні функції
 # ------------------------------------------------------
@@ -1231,28 +1239,22 @@ def delete_note_by_text(args: List[str], nb: Notebook, abook: AddressBook):
 # Багаторівневий Completer
 # ------------------------------------------------------
 class MultiLevelCompleter(Completer):
-    """
-    Приклад мінімального багаторівневого автодоповнення:
-    - Якщо користувач набирає перше слово, пропонуємо список команд.
-    - Якщо вже набрали команду, пропонуємо певні ключі для аргументів.
-    """
-
-    def __init__(self, commands, subcommands_map):
+    def __init__(self, commands, subcommands_map, abook: AddressBook, nbook: Notebook):
         super().__init__()
-        self.commands = commands  # перелік основних команд
-        self.subcommands_map = subcommands_map  # dict{"edit-note": ["text=", "tags=", ...], ...}
+        self.commands = commands
+        self.subcommands_map = subcommands_map
+        self.abook = abook
+        self.nbook = nbook
 
     def get_completions(self, document, complete_event):
         text = document.text_before_cursor.lstrip()
         tokens = text.split()
 
-        # Якщо нічого не введено - пропонуємо усі команди
         if len(tokens) == 0:
             for cmd in self.commands:
                 yield Completion(cmd, start_position=0)
             return
 
-        # Якщо введено 1 слово (можливо, частина команди)
         if len(tokens) == 1:
             partial_cmd = tokens[0].lower()
             for cmd in self.commands:
@@ -1260,12 +1262,26 @@ class MultiLevelCompleter(Completer):
                     yield Completion(cmd, start_position=-len(partial_cmd))
             return
 
-        # Якщо введено 2+ слова: перший токен — команда
         command = tokens[0].lower()
-        # Можемо підказувати аргументи
-        if command in self.subcommands_map:
+        current_arg = tokens[-1] if len(tokens) > 1 else ""
+
+        if command in ["edit-contact", "delete-contact"]:
+            # Пропонуємо ID контактів
+            ids = self.abook.get_contact_ids()
+            for id_str in ids:
+                if id_str.startswith(current_arg):
+                    yield Completion(id_str, start_position=-len(current_arg))
+
+        elif command == "search-tag":
+            # Пропонуємо теги
+            tags = self.nbook.get_unique_tags()
+            for tag in tags:
+                if tag.startswith(current_arg):
+                    yield Completion(tag, start_position=-len(current_arg))
+
+        # Існуюча логіка для інших команд
+        elif command in self.subcommands_map:
             possible_args = self.subcommands_map[command]
-            current_arg = tokens[-1]
             for arg in possible_args:
                 if arg.startswith(current_arg):
                     yield Completion(arg, start_position=-len(current_arg))
@@ -1364,7 +1380,7 @@ def main():
         "list-pinned": []
     }
 
-    custom_completer = MultiLevelCompleter(all_commands, subcommands_map)
+    custom_completer = MultiLevelCompleter(all_commands, subcommands_map, abook, nbook)
     session = PromptSession(">>> ", completer=custom_completer)
 
     print(Fore.GREEN + "Вітаю! Це ваш персональний помічник." + Style.RESET_ALL)
