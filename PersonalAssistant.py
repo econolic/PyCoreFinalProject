@@ -9,7 +9,6 @@ from typing import List, Optional, Dict, Type, TypeVar, Generic, Any
 from collections import UserDict, deque, defaultdict
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-
 from colorama import Fore, Style, init
 from difflib import get_close_matches
 from prompt_toolkit import PromptSession
@@ -523,7 +522,7 @@ def remove_session_files():
     if os.path.exists(SESSION_NOTES_FILE):
         os.remove(SESSION_NOTES_FILE)
 
-def load_from_session_files() -> (AddressBook, Notebook):
+def load_from_session_files() -> tuple[AddressBook, Notebook]:
     """
     Завантажуємо AddressBook та Notebook з pickle-файлів.
     Якщо вони відсутні/пошкоджені, повертаємо порожні.
@@ -571,7 +570,7 @@ def commit_session_to_json(abook: AddressBook, nbook: Notebook):
 # ------------------------------------------------------
 # Перевірка існування сесійних файлів / завантаження основних
 # ------------------------------------------------------
-def restore_or_load() -> (AddressBook, Notebook):
+def restore_or_load() -> tuple[AddressBook, Notebook]:
     """
     Якщо існують session.pkl — запитуємо у користувача, чи відновлювати.
     Якщо так => вантажимо з pickle.
@@ -1211,6 +1210,23 @@ def list_tags(args: List[str], nb: Notebook):
         count = len(tag_dict[tag])
         print(f"• {tag} ({count} нот.)")
 
+@input_error
+def delete_note_by_text(args: List[str], nb: Notebook, abook: AddressBook):
+    """delete-note-text <query> — видаляє всі нотатки, що містять заданий текст."""
+    if not args:
+        raise ValueError("Використання: delete-note-text <query>")
+    query = " ".join(args).lower()
+    notes_to_delete = [note for note in nb.data.values() if query in note.text.lower()]
+    if not notes_to_delete:
+        print(Fore.CYAN + f"Нотаток із текстом '{query}' не знайдено." + Style.RESET_ALL)
+        return
+    deleted_count = 0
+    for note in notes_to_delete:
+        if nb.delete(note.id):
+            deleted_count += 1
+    print(Fore.GREEN + f"Видалено {deleted_count} нотаток із текстом '{query}'." + Style.RESET_ALL)
+    save_all(abook, nb)
+    
 # ------------------------------------------------------
 # Багаторівневий Completer
 # ------------------------------------------------------
