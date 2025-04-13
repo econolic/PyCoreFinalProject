@@ -34,5 +34,17 @@
         ],
         "emails": [],
         "birthday": "1989-12-23"
+    },
+    "6": {
+        "id": 6,
+        "name": "Helga",
+        "phones": [
+            "+380675626894"
+        ],
+        "emails": [
+            "1@1.com.ua",
+            "2.1@com.ua"
+        ],
+        "birthday": "2001-09-30"
     }
 }
